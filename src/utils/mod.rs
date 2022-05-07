@@ -96,13 +96,13 @@ pub fn unique_id_from_content(content: &str, id_counter: &mut HashMap<String, us
 /// page go to the original location. Normal page rendering sets `path` to
 /// None. Ideally, print page links would link to anchors on the print page,
 /// but that is very difficult.
-fn adjust_links<'a>(event: Event<'a>, path: Option<&Path>) -> Event<'a> {
+fn adjust_links<'a>(event: Event<'a>, path: Option<&Path>, abs_url: Option<&String>) -> Event<'a> {
     lazy_static! {
         static ref SCHEME_LINK: Regex = Regex::new(r"^[a-z][a-z0-9+.-]*:").unwrap();
         static ref MD_LINK: Regex = Regex::new(r"(?P<link>.*)\.md(?P<anchor>#.*)?").unwrap();
     }
 
-    fn fix<'a>(dest: CowStr<'a>, path: Option<&Path>) -> CowStr<'a> {
+    fn fix<'a>(dest: CowStr<'a>, path: Option<&Path>, abs_url: Option<&String>) -> CowStr<'a> {
         if dest.starts_with('#') {
             // Fragment-only link.
             if let Some(path) = path {
@@ -139,12 +139,19 @@ fn adjust_links<'a>(event: Event<'a>, path: Option<&Path>) -> Event<'a> {
             } else {
                 fixed_link.push_str(&dest);
             };
-            return CowStr::from(fixed_link);
+            if fixed_link.starts_with('/') {
+                fixed_link = match abs_url {
+                    Some(abs_url) => format!("{}{}", abs_url.trim_end_matches('/'), &fixed_link),
+                    None => fixed_link,
+                }
+                .into();
+            }
+            return CowStr::from(format!("{}", fixed_link));
         }
         dest
     }
 
-    fn fix_html<'a>(html: CowStr<'a>, path: Option<&Path>) -> CowStr<'a> {
+    fn fix_html<'a>(html: CowStr<'a>, path: Option<&Path>, abs_url: Option<&String>) -> CowStr<'a> {
         // This is a terrible hack, but should be reasonably reliable. Nobody
         // should ever parse a tag with a regex. However, there isn't anything
         // in Rust that I know of that is suitable for handling partial html
@@ -160,7 +167,7 @@ fn adjust_links<'a>(event: Event<'a>, path: Option<&Path>) -> Event<'a> {
 
         HTML_LINK
             .replace_all(&html, |caps: &regex::Captures<'_>| {
-                let fixed = fix(caps[2].into(), path);
+                let fixed = fix(caps[2].into(), path, abs_url);
                 format!("{}{}\"", &caps[1], fixed)
             })
             .into_owned()
@@ -169,19 +176,19 @@ fn adjust_links<'a>(event: Event<'a>, path: Option<&Path>) -> Event<'a> {
 
     match event {
         Event::Start(Tag::Link(link_type, dest, title)) => {
-            Event::Start(Tag::Link(link_type, fix(dest, path), title))
+            Event::Start(Tag::Link(link_type, fix(dest, path, abs_url), title))
         }
         Event::Start(Tag::Image(link_type, dest, title)) => {
-            Event::Start(Tag::Image(link_type, fix(dest, path), title))
+            Event::Start(Tag::Image(link_type, fix(dest, path, abs_url), title))
         }
-        Event::Html(html) => Event::Html(fix_html(html, path)),
+        Event::Html(html) => Event::Html(fix_html(html, path, abs_url)),
         _ => event,
     }
 }
 
 /// Wrapper around the pulldown-cmark parser for rendering markdown to HTML.
 pub fn render_markdown(text: &str, curly_quotes: bool) -> String {
-    render_markdown_with_path(text, curly_quotes, None)
+    render_markdown_with_path(text, curly_quotes, None, None)
 }
 
 pub fn new_cmark_parser(text: &str, curly_quotes: bool) -> Parser<'_, '_> {
@@ -196,12 +203,17 @@ pub fn new_cmark_parser(text: &str, curly_quotes: bool) -> Parser<'_, '_> {
     Parser::new_ext(text, opts)
 }
 
-pub fn render_markdown_with_path(text: &str, curly_quotes: bool, path: Option<&Path>) -> String {
+pub fn render_markdown_with_path(
+    text: &str,
+    curly_quotes: bool,
+    path: Option<&Path>,
+    abs_url: Option<&String>,
+) -> String {
     let mut s = String::with_capacity(text.len() * 3 / 2);
     let p = new_cmark_parser(text, curly_quotes);
     let events = p
         .map(clean_codeblock_headers)
-        .map(|event| adjust_links(event, path))
+        .map(|event| adjust_links(event, path, abs_url))
         .flat_map(|event| {
             let (a, b) = wrap_tables(event);
             a.into_iter().chain(b)
