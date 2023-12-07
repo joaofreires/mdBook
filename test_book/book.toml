@@ -9,6 +9,8 @@ edition = "2018"
 
 [output.html]
 mathjax-support = true
+site-url = "/docs/"
+use-site-url-as-root = true
 
 [output.html.playground]
 editable = true
