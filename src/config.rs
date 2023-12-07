@@ -308,7 +308,7 @@ impl<'de> serde::Deserialize<'de> for Config {
             warn!("`description` under a table called `[book]`, move the `destination` entry");
             warn!("from `[output.html]`, renamed to `build-dir`, under a table called");
             warn!("`[build]`, and it should all work.");
-            warn!("Documentation: http://rust-lang.github.io/mdBook/format/config.html");
+            warn!("Documentation: https://rust-lang.github.io/mdBook/format/config.html");
             return Ok(Config::from_legacy(raw));
         }
 
@@ -411,6 +411,9 @@ pub struct BookConfig {
     pub multilingual: bool,
     /// The main language of the book.
     pub language: Option<String>,
+    /// The direction of text in the book: Left-to-right (LTR) or Right-to-left (RTL).
+    /// When not specified, the text direction is derived from [`BookConfig::language`].
+    pub text_direction: Option<TextDirection>,
 }
 
 impl Default for BookConfig {
@@ -422,6 +425,43 @@ impl Default for BookConfig {
             src: PathBuf::from("src"),
             multilingual: false,
             language: Some(String::from("en")),
+            text_direction: None,
+        }
+    }
+}
+
+impl BookConfig {
+    /// Gets the realized text direction, either from [`BookConfig::text_direction`]
+    /// or derived from [`BookConfig::language`], to be used by templating engines.
+    pub fn realized_text_direction(&self) -> TextDirection {
+        if let Some(direction) = self.text_direction {
+            direction
+        } else {
+            TextDirection::from_lang_code(self.language.as_deref().unwrap_or_default())
+        }
+    }
+}
+
+/// Text direction to use for HTML output
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TextDirection {
+    /// Left to right.
+    #[serde(rename = "ltr")]
+    LeftToRight,
+    /// Right to left
+    #[serde(rename = "rtl")]
+    RightToLeft,
+}
+
+impl TextDirection {
+    /// Gets the text direction from language code
+    pub fn from_lang_code(code: &str) -> Self {
+        match code {
+            // list sourced from here: https://github.com/abarrak/rtl/blob/master/lib/rtl/core.rb#L16
+            "ar" | "ara" | "arc" | "ae" | "ave" | "egy" | "he" | "heb" | "nqo" | "pal" | "phn"
+            | "sam" | "syc" | "syr" | "fa" | "per" | "fas" | "ku" | "kur" | "ur" | "urd"
+            | "pus" | "ps" | "yi" | "yid" => TextDirection::RightToLeft,
+            _ => TextDirection::LeftToRight,
         }
     }
 }
@@ -438,6 +478,8 @@ pub struct BuildConfig {
     /// Should the default preprocessors always be used when they are
     /// compatible with the renderer?
     pub use_default_preprocessors: bool,
+    /// Extra directories to trigger rebuild when watching/serving
+    pub extra_watch_dirs: Vec<PathBuf>,
 }
 
 impl Default for BuildConfig {
@@ -446,6 +488,7 @@ impl Default for BuildConfig {
             build_dir: PathBuf::from("book"),
             create_missing: true,
             use_default_preprocessors: true,
+            extra_watch_dirs: Vec::new(),
         }
     }
 }
@@ -501,6 +544,8 @@ pub struct HtmlConfig {
     /// Playground settings.
     #[serde(alias = "playpen")]
     pub playground: Playground,
+    /// Code settings.
+    pub code: Code,
     /// Print settings.
     pub print: Print,
     /// Don't render section labels.
@@ -529,10 +574,9 @@ pub struct HtmlConfig {
     /// directly jumping to editing the currently viewed page.
     /// Contains {path} that is replaced with chapter source file path
     pub edit_url_template: Option<String>,
-    /// Endpoint of websocket, for livereload usage. Value loaded from .toml file
-    /// is ignored, because our code overrides this field with the value [`LIVE_RELOAD_ENDPOINT`]
-    ///
-    /// [`LIVE_RELOAD_ENDPOINT`]: cmd::serve::LIVE_RELOAD_ENDPOINT
+    /// Endpoint of websocket, for livereload usage. Value loaded from .toml
+    /// file is ignored, because our code overrides this field with an
+    /// internal value (`LIVE_RELOAD_ENDPOINT)
     ///
     /// This config item *should not be edited* by the end user.
     #[doc(hidden)]
@@ -556,6 +600,7 @@ impl Default for HtmlConfig {
             additional_js: Vec::new(),
             fold: Fold::default(),
             playground: Playground::default(),
+            code: Code::default(),
             print: Print::default(),
             no_section_label: false,
             search: None,
@@ -643,6 +688,22 @@ impl Default for Playground {
     }
 }
 
+/// Configuration for tweaking how the the HTML renderer handles code blocks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Code {
+    /// A prefix string to hide lines per language (one or more chars).
+    pub hidelines: HashMap<String, String>,
+}
+
+impl Default for Code {
+    fn default() -> Code {
+        Code {
+            hidelines: HashMap::new(),
+        }
+    }
+}
+
 /// Configuration of the search functionality of the HTML renderer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -704,7 +765,7 @@ trait Updateable<'de>: Serialize + Deserialize<'de> {
         let mut raw = Value::try_from(&self).expect("unreachable");
 
         if let Ok(value) = Value::try_from(value) {
-            let _ = raw.insert(key, value);
+            raw.insert(key, value);
         } else {
             return;
         }
@@ -770,11 +831,13 @@ mod tests {
             multilingual: true,
             src: PathBuf::from("source"),
             language: Some(String::from("ja")),
+            text_direction: None,
         };
         let build_should_be = BuildConfig {
             build_dir: PathBuf::from("outputs"),
             create_missing: false,
             use_default_preprocessors: true,
+            extra_watch_dirs: Vec::new(),
         };
         let rust_should_be = RustConfig { edition: None };
         let playground_should_be = Playground {
@@ -985,6 +1048,7 @@ mod tests {
             build_dir: PathBuf::from("my-book"),
             create_missing: true,
             use_default_preprocessors: true,
+            extra_watch_dirs: Vec::new(),
         };
 
         let html_should_be = HtmlConfig {
@@ -1118,6 +1182,73 @@ mod tests {
         let html_config = got.html_config().unwrap();
         assert_eq!(html_config.input_404, Some("missing.md".to_string()));
         assert_eq!(&get_404_output_file(&html_config.input_404), "missing.html");
+    }
+
+    #[test]
+    fn text_direction_ltr() {
+        let src = r#"
+        [book]
+        text-direction = "ltr"
+        "#;
+
+        let got = Config::from_str(src).unwrap();
+        assert_eq!(got.book.text_direction, Some(TextDirection::LeftToRight));
+    }
+
+    #[test]
+    fn text_direction_rtl() {
+        let src = r#"
+        [book]
+        text-direction = "rtl"
+        "#;
+
+        let got = Config::from_str(src).unwrap();
+        assert_eq!(got.book.text_direction, Some(TextDirection::RightToLeft));
+    }
+
+    #[test]
+    fn text_direction_none() {
+        let src = r#"
+        [book]
+        "#;
+
+        let got = Config::from_str(src).unwrap();
+        assert_eq!(got.book.text_direction, None);
+    }
+
+    #[test]
+    fn test_text_direction() {
+        let mut cfg = BookConfig::default();
+
+        // test deriving the text direction from language codes
+        cfg.language = Some("ar".into());
+        assert_eq!(cfg.realized_text_direction(), TextDirection::RightToLeft);
+
+        cfg.language = Some("he".into());
+        assert_eq!(cfg.realized_text_direction(), TextDirection::RightToLeft);
+
+        cfg.language = Some("en".into());
+        assert_eq!(cfg.realized_text_direction(), TextDirection::LeftToRight);
+
+        cfg.language = Some("ja".into());
+        assert_eq!(cfg.realized_text_direction(), TextDirection::LeftToRight);
+
+        // test forced direction
+        cfg.language = Some("ar".into());
+        cfg.text_direction = Some(TextDirection::LeftToRight);
+        assert_eq!(cfg.realized_text_direction(), TextDirection::LeftToRight);
+
+        cfg.language = Some("ar".into());
+        cfg.text_direction = Some(TextDirection::RightToLeft);
+        assert_eq!(cfg.realized_text_direction(), TextDirection::RightToLeft);
+
+        cfg.language = Some("en".into());
+        cfg.text_direction = Some(TextDirection::LeftToRight);
+        assert_eq!(cfg.realized_text_direction(), TextDirection::LeftToRight);
+
+        cfg.language = Some("en".into());
+        cfg.text_direction = Some(TextDirection::RightToLeft);
+        assert_eq!(cfg.realized_text_direction(), TextDirection::RightToLeft);
     }
 
     #[test]
